@@ -798,6 +798,7 @@ body.sidebar-collapsed .sidebar-edge-toggle { left: 16px; }
     <button class="btn" id="importHtmlBtn" title="Import a previously exported HTML replay for re-editing">Import HTML</button>
     <input type="file" id="importHtmlFile" accept=".html" style="display:none">
     <button class="btn" id="exportDataBtn" disabled title="Download session data as JSON">Export JSON</button>
+    <button class="btn" id="exportGifBtn" disabled title="Render an animated GIF using user-installed Playwright and ffmpeg">Export GIF</button>
     <button class="btn btn-primary" id="exportBtn" disabled>Export HTML</button>
     <button class="btn theme-mode-btn" id="themeModeBtn" title="Toggle dark/light mode">
       <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
@@ -991,6 +992,7 @@ body.sidebar-collapsed .sidebar-edge-toggle { left: 16px; }
       <ul>
         <li><b>Import HTML</b> — load a previously exported replay for re-editing</li>
         <li><b>Export HTML</b> — download the replay as a self-contained HTML file</li>
+        <li><b>Export GIF</b> — render a fixed 800×500 animated GIF using Playwright and ffmpeg installed on your machine</li>
         <li><b>Export JSON</b> — download the session data (turns and bookmarks) as JSON</li>
       </ul>
       <p>The preview updates live as you edit. Edits are automatically saved to <code>~/.claude-replay/autosave/</code> and restored when you reopen a session. Reset clears the autosave.</p>
@@ -1084,6 +1086,7 @@ body.sidebar-collapsed .sidebar-edge-toggle { left: 16px; }
   const titleInput        = $("titleInput");
   const resetBtn          = $("resetBtn");
   const exportBtn         = $("exportBtn");
+  const exportGifBtn      = $("exportGifBtn");
   const exportDataBtn     = $("exportDataBtn");
   const importHtmlBtn     = $("importHtmlBtn");
   const importHtmlFile    = $("importHtmlFile");
@@ -1390,6 +1393,7 @@ body.sidebar-collapsed .sidebar-edge-toggle { left: 16px; }
       titleInput.disabled = false;
       resetBtn.disabled = false;
       exportBtn.disabled = false;
+      exportGifBtn.disabled = false;
       exportDataBtn.disabled = false;
 
       updateEditState(data.hasEdits || false);
@@ -1713,6 +1717,33 @@ body.sidebar-collapsed .sidebar-edge-toggle { left: 16px; }
     }
   }
 
+  async function doExportGif() {
+    if (!currentSessionId) return;
+    const originalLabel = exportGifBtn.textContent;
+    exportGifBtn.disabled = true;
+    exportGifBtn.textContent = "Exporting\u2026";
+    try {
+      const res = await api("POST", "/api/export-gif", {
+        sessionId: currentSessionId,
+        options: gatherOptions(),
+      });
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = (titleInput.value || "replay").replace(/[^a-zA-Z0-9_-]/g, "_") + ".gif";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert("GIF export failed: " + e.message);
+    } finally {
+      exportGifBtn.textContent = originalLabel;
+      exportGifBtn.disabled = !currentSessionId;
+    }
+  }
+
   async function doExportData() {
     if (!currentSessionId) return;
     try {
@@ -1795,6 +1826,7 @@ body.sidebar-collapsed .sidebar-edge-toggle { left: 16px; }
   // Toolbar actions
   resetBtn.addEventListener("click", doReset);
   exportBtn.addEventListener("click", doExport);
+  exportGifBtn.addEventListener("click", doExportGif);
   exportDataBtn.addEventListener("click", doExportData);
 
   // Import HTML replay
@@ -1817,6 +1849,7 @@ body.sidebar-collapsed .sidebar-edge-toggle { left: 16px; }
       titleInput.disabled = false;
       resetBtn.disabled = false;
       exportBtn.disabled = false;
+      exportGifBtn.disabled = false;
       exportDataBtn.disabled = false;
       updateEditState(false);
       showOptionsPanel();

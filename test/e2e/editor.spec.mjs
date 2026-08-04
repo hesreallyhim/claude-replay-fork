@@ -62,6 +62,8 @@ test("editor page loads with sessions panel", async ({ page }) => {
   await expect(page.locator("#sessionsSearch")).toBeVisible();
   await expect(page.locator("#titleInput")).toBeVisible();
   await expect(page.locator("#exportBtn")).toBeVisible();
+  await expect(page.locator("#exportGifBtn")).toBeVisible();
+  await expect(page.locator("#exportGifBtn")).toBeDisabled();
 });
 
 test("loading a session shows turns in editor", async ({ page }) => {
@@ -334,6 +336,54 @@ test("export button triggers download", async ({ page }) => {
   const download = await downloadPromise;
 
   expect(download.suggestedFilename()).toMatch(/\.html$/);
+});
+
+test("GIF export sends the current options, shows busy state, and downloads a GIF", async ({ page }) => {
+  await gotoEditor(page);
+  await loadFixture(page);
+  await expect(page.locator("#exportGifBtn")).toBeEnabled();
+
+  let requestBody;
+  await page.route("**/api/export-gif", async (route) => {
+    requestBody = route.request().postDataJSON();
+    await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+    await route.fulfill({
+      status: 200,
+      contentType: "image/gif",
+      headers: { "Content-Disposition": 'attachment; filename="replay.gif"' },
+      body: Buffer.from("GIF89a-test"),
+    });
+  });
+
+  const downloadPromise = page.waitForEvent("download", { timeout: 10_000 });
+  await page.locator("#exportGifBtn").click();
+  await expect(page.locator("#exportGifBtn")).toBeDisabled();
+  await expect(page.locator("#exportGifBtn")).toHaveText("Exporting\u2026");
+  const download = await downloadPromise;
+
+  expect(download.suggestedFilename()).toMatch(/\.gif$/);
+  expect(requestBody.sessionId).toBeTruthy();
+  expect(requestBody.options.title).toMatch(/^Replay/);
+  await expect(page.locator("#exportGifBtn")).toBeEnabled();
+  await expect(page.locator("#exportGifBtn")).toHaveText("Export GIF");
+});
+
+test("GIF export displays an actionable server error and clears busy state", async ({ page }) => {
+  await gotoEditor(page);
+  await loadFixture(page);
+  await page.route("**/api/export-gif", (route) => route.fulfill({
+    status: 503,
+    contentType: "application/json",
+    body: JSON.stringify({ error: "Install Playwright for GIF export" }),
+  }));
+
+  const dialogPromise = page.waitForEvent("dialog");
+  await page.locator("#exportGifBtn").click();
+  const dialog = await dialogPromise;
+  expect(dialog.message()).toContain("Install Playwright for GIF export");
+  await dialog.accept();
+  await expect(page.locator("#exportGifBtn")).toBeEnabled();
+  await expect(page.locator("#exportGifBtn")).toHaveText("Export GIF");
 });
 
 // ─── Reset ─────────────────────────────────────────────────

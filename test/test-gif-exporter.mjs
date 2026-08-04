@@ -266,6 +266,40 @@ describe("GIF exporter", () => {
     }
   });
 
+  it("times out before backfilling when a screenshot crosses the capture limit", async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "claude-replay-playback-timeout-test-"));
+    let now = 0;
+    let completionChecks = 0;
+    t.mock.method(performance, "now", () => now);
+    const page = {
+      screenshot: async ({ path }) => {
+        writeFileSync(path, "late-screenshot");
+        now = GIF_EXPORT_PROFILE.maxDurationMs + 1;
+      },
+      locator: () => ({
+        count: async () => {
+          completionChecks++;
+          return 1;
+        },
+      }),
+    };
+
+    try {
+      await assert.rejects(
+        () => __test.capturePlayback(page, dir, 0),
+        (error) => error instanceof GifExportError && error.code === "capture_timeout",
+      );
+      assert.equal(completionChecks, 0, "capture should time out before checking playback completion");
+      assert.deepEqual(
+        readdirSync(dir),
+        [".playback-pending.png"],
+        "capture should time out before creating numbered backfill frames",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("waits for a SIGTERM-resistant child to close before reporting cancellation", { skip: process.platform === "win32" }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "claude-replay-child-test-"));
     const executable = join(dir, "ignore-term");

@@ -313,6 +313,15 @@ async function captureHold(page, framesDir, startIndex, frameCount, signal, getP
   return frameIndex;
 }
 
+function throwIfCaptureTimedOut(startedAt, now) {
+  if (now - startedAt > GIF_EXPORT_PROFILE.maxDurationMs) {
+    throw new GifExportError(
+      "capture_timeout",
+      "GIF capture exceeded 120 seconds. Exclude more turns or increase playback speed and try again.",
+    );
+  }
+}
+
 async function capturePlayback(page, framesDir, startIndex, signal, getPageFailure) {
   const startedAt = performance.now();
   let nextDeadline = startedAt;
@@ -323,19 +332,15 @@ async function capturePlayback(page, framesDir, startIndex, signal, getPageFailu
   while (true) {
     throwIfAborted(signal);
     throwIfPageFailed(getPageFailure);
-    if (performance.now() - startedAt > GIF_EXPORT_PROFILE.maxDurationMs) {
-      throw new GifExportError(
-        "capture_timeout",
-        "GIF capture exceeded 120 seconds. Exclude more turns or increase playback speed and try again.",
-      );
-    }
+    throwIfCaptureTimedOut(startedAt, performance.now());
 
     const remaining = nextDeadline - performance.now();
     if (remaining > 0) await wait(remaining, signal);
 
     await page.screenshot({ path: pendingPath });
-    throwIfPageFailed(getPageFailure);
     const completedAt = performance.now();
+    throwIfCaptureTimedOut(startedAt, completedAt);
+    throwIfPageFailed(getPageFailure);
 
     nextDeadline += FRAME_INTERVAL_MS;
     while (nextDeadline <= completedAt) {

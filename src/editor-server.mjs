@@ -14,6 +14,7 @@ import { render } from "./renderer.mjs";
 import { extractData } from "./extract.mjs";
 import { getTheme, listThemes } from "./themes.mjs";
 import { DEFAULT_READING_WPM, MIN_READING_WPM, MAX_READING_WPM } from "./reading-rate.mjs";
+import { exportGif, GifExportError } from "./gif-exporter.mjs";
 
 const EDITOR_HTML_PATH = new URL("../template/editor.html", import.meta.url);
 const PKG = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
@@ -552,6 +553,18 @@ function discoverSessions() {
 // Origin check configuration (set by startEditor)
 let _noOriginCheck = false;
 let _allowedOrigins = new Set();
+let _gifExporter = exportGif;
+let _gifExportActive = false;
+
+const GIF_EXPORT_TIMEOUT_MS = 120_000;
+
+function gifExportStatus(error) {
+  if (error?.code === "playwright_missing" || error?.code === "playwright_load_failed"
+      || error?.code === "browser_missing" || error?.code === "ffmpeg_missing") return 503;
+  if (error?.code === "capture_timeout") return 504;
+  if (error?.name === "AbortError") return 499;
+  return 500;
+}
 
 async function handleApi(req, res, pathname) {
   // CSRF protection: reject cross-origin requests to the API.
@@ -752,6 +765,85 @@ async function handleApi(req, res, pathname) {
     return res.end(html);
   }
 
+  // POST /api/export-gif — render and synchronously capture a fixed-profile GIF
+  if (pathname === "/api/export-gif" && req.method === "POST") {
+    if (_gifExportActive) return error(res, "Another GIF export is already running", 409);
+
+    const body = await readBody(req);
+    // A second request may have started while this request body was arriving.
+    if (_gifExportActive) return error(res, "Another GIF export is already running", 409);
+    const { sessionId, options = {} } = body;
+    const session = sessions.get(sessionId);
+    if (!session) return error(res, "Unknown session", 404);
+    const { turns, hasRealTimestamps } = prepareTurns(session, options);
+    if (turns.length === 0) return error(res, "Cannot export an empty replay", 400);
+
+    const html = render(turns, buildRenderOpts(options, session, {
+      hasRealTimestamps,
+      pacedWording: false,
+      minified: false,
+      compress: false,
+    }));
+    if (req.aborted || res.destroyed) return;
+    const filename = (options.title || "replay").replace(/[^a-zA-Z0-9_-]/g, "_") + ".gif";
+    const controller = new AbortController();
+    const timeoutError = new GifExportError(
+      "capture_timeout",
+      "GIF export exceeded 120 seconds. Exclude more turns or increase playback speed and try again.",
+    );
+    const timeout = setTimeout(() => controller.abort(timeoutError), GIF_EXPORT_TIMEOUT_MS);
+    const abortRequest = () => controller.abort(new Error("GIF export request was closed"));
+    const abortResponse = () => {
+      if (!res.writableEnded) abortRequest();
+    };
+    let shutdownSignal = null;
+    const abortForShutdown = (signalName) => {
+      shutdownSignal = signalName;
+      controller.abort(new Error("Editor shutdown cancelled GIF export"));
+    };
+    const abortForSigint = () => abortForShutdown("SIGINT");
+    const abortForSigterm = () => abortForShutdown("SIGTERM");
+    req.once("aborted", abortRequest);
+    res.once("close", abortResponse);
+    process.once("SIGINT", abortForSigint);
+    process.once("SIGTERM", abortForSigterm);
+    _gifExportActive = true;
+
+    try {
+      const gif = await _gifExporter({ html, signal: controller.signal });
+      if (controller.signal.aborted || res.destroyed) return;
+      res.writeHead(200, {
+        "Content-Type": "image/gif",
+        "Content-Disposition": `attachment; filename="${filename}"`,
+        "Content-Length": gif.length,
+      });
+      return res.end(gif);
+    } catch (exportError) {
+      if (res.destroyed) return;
+      const message = exportError instanceof GifExportError || exportError?.name === "AbortError"
+        ? exportError.message
+        : `GIF export failed: ${exportError.message}`;
+      return error(res, message, gifExportStatus(exportError));
+    } finally {
+      clearTimeout(timeout);
+      req.removeListener("aborted", abortRequest);
+      res.removeListener("close", abortResponse);
+      process.removeListener("SIGINT", abortForSigint);
+      process.removeListener("SIGTERM", abortForSigterm);
+      _gifExportActive = false;
+      if (shutdownSignal) {
+        const signalName = shutdownSignal;
+        setImmediate(() => {
+          try {
+            process.kill(process.pid, signalName);
+          } catch {
+            process.exit(signalName === "SIGINT" ? 130 : 143);
+          }
+        });
+      }
+    }
+  }
+
   // POST /api/reset — restore working turns from original
   if (pathname === "/api/reset" && req.method === "POST") {
     const body = await readBody(req);
@@ -776,9 +868,10 @@ async function handleApi(req, res, pathname) {
  * Start the editor HTTP server.
  * Returns a promise that never resolves (keeps the caller waiting).
  * @param {number} port
+ * @param {{ open?: boolean, host?: string, initialFile?: string, noOriginCheck?: boolean, allowedOrigins?: string[], gifExporter?: typeof exportGif }} [options]
  * @returns {Promise<void>}
  */
-export function startEditor(port, { open = true, host = "127.0.0.1", initialFile, noOriginCheck = false, allowedOrigins } = {}) {
+export function startEditor(port, { open = true, host = "127.0.0.1", initialFile, noOriginCheck = false, allowedOrigins, gifExporter = exportGif } = {}) {
   // Configure origin checking
   _noOriginCheck = noOriginCheck;
   const envOrigins = process.env.CLAUDE_REPLAY_ALLOWED_ORIGINS;
@@ -786,6 +879,8 @@ export function startEditor(port, { open = true, host = "127.0.0.1", initialFile
     ...(allowedOrigins || []),
     ...(envOrigins ? envOrigins.split(",").map((s) => s.trim()).filter(Boolean) : []),
   ]);
+  _gifExporter = gifExporter;
+  _gifExportActive = false;
 
   const editorHtml = readFileSync(EDITOR_HTML_PATH, "utf-8")
     .replaceAll("/*DEFAULT_READING_WPM*/", String(DEFAULT_READING_WPM))

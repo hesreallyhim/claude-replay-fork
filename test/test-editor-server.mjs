@@ -21,9 +21,10 @@ describe("editor-server API", () => {
     baseUrl = `http://127.0.0.1:${port}`;
 
     const srcPath = resolve(__dirname, "..", "src", "editor-server.mjs").replace(/\\/g, "/");
+    const exporterPath = resolve(__dirname, "..", "src", "gif-exporter.mjs").replace(/\\/g, "/");
     writeFileSync(
       HELPER_PATH,
-      `import { startEditor } from "${srcPath}";\nstartEditor(${port}, { open: false });\n`,
+      `import { startEditor } from "${srcPath}";\nimport { GifExportError } from "${exporterPath}";\nfunction delay(ms, signal) { return new Promise((resolve, reject) => { const timer = setTimeout(resolve, ms); signal.addEventListener("abort", () => { clearTimeout(timer); const error = new Error("GIF export was cancelled"); error.name = "AbortError"; reject(error); }, { once: true }); }); }\nasync function gifExporter({ html, signal }) { if (html.includes("Missing Playwright")) throw new GifExportError("playwright_missing", "Install Playwright for GIF export"); if (html.includes("const pacedWordingRequested = true;")) throw new Error("Paced wording was not disabled"); await delay(html.includes("Slow GIF") ? 500 : 20, signal); return Buffer.from("GIF89a-test"); }\nstartEditor(${port}, { open: false, gifExporter });\n`,
     );
 
     child = spawn(process.execPath, [HELPER_PATH], {
@@ -225,6 +226,118 @@ describe("editor-server API", () => {
     assert.match(disposition, /test-export\.html/);
     const html = await res.text();
     assert.match(html, /<!DOCTYPE html>/);
+  });
+
+  it("POST /api/export-gif returns a sanitized GIF attachment and disables paced wording", async () => {
+    const loadRes = await fetch(`${baseUrl}/api/load`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: FIXTURE_PATH }),
+    });
+    const { sessionId } = await loadRes.json();
+
+    const res = await fetch(`${baseUrl}/api/export-gif`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        options: { title: "GIF / test", timing: "paced", pacing: "paced-wording", speed: 10 },
+      }),
+    });
+
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("content-type"), "image/gif");
+    assert.match(res.headers.get("content-disposition"), /filename="GIF___test\.gif"/);
+    assert.equal(Buffer.from(await res.arrayBuffer()).toString(), "GIF89a-test");
+  });
+
+  it("POST /api/export-gif rejects an empty filtered replay", async () => {
+    const loadRes = await fetch(`${baseUrl}/api/load`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: FIXTURE_PATH }),
+    });
+    const { sessionId, turns } = await loadRes.json();
+
+    const res = await fetch(`${baseUrl}/api/export-gif`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        options: { excludeTurns: turns.map((turn) => turn.index) },
+      }),
+    });
+
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /empty replay/);
+  });
+
+  it("POST /api/export-gif maps missing optional runtimes to an actionable service error", async () => {
+    const loadRes = await fetch(`${baseUrl}/api/load`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: FIXTURE_PATH }),
+    });
+    const { sessionId } = await loadRes.json();
+
+    const res = await fetch(`${baseUrl}/api/export-gif`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, options: { title: "Missing Playwright" } }),
+    });
+
+    assert.equal(res.status, 503);
+    assert.match((await res.json()).error, /Install Playwright/);
+  });
+
+  it("POST /api/export-gif permits only one active export", async () => {
+    const loadRes = await fetch(`${baseUrl}/api/load`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: FIXTURE_PATH }),
+    });
+    const { sessionId } = await loadRes.json();
+    const request = (title) => fetch(`${baseUrl}/api/export-gif`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, options: { title } }),
+    });
+
+    const first = request("Slow GIF");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    const second = await request("Concurrent GIF");
+
+    assert.equal(second.status, 409);
+    assert.match((await second.json()).error, /already running/);
+    assert.equal((await first).status, 200);
+  });
+
+  it("POST /api/export-gif cancels on disconnect and releases the export guard", async () => {
+    const loadRes = await fetch(`${baseUrl}/api/load`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: FIXTURE_PATH }),
+    });
+    const { sessionId } = await loadRes.json();
+    const controller = new AbortController();
+    const request = fetch(`${baseUrl}/api/export-gif`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, options: { title: "Slow GIF abort" } }),
+      signal: controller.signal,
+    });
+
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    controller.abort();
+    await assert.rejects(request, (requestError) => requestError.name === "AbortError");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+
+    const followUp = await fetch(`${baseUrl}/api/export-gif`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, options: { title: "After abort" } }),
+    });
+    assert.equal(followUp.status, 200);
   });
 
   it("POST /api/export-data returns JSON with turns and bookmarks", async () => {

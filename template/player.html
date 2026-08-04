@@ -2328,6 +2328,20 @@ body.in-iframe .more-open-link + hr.more-divider { display: block; }
     };
   }
 
+  // Capture boundary: final content is visible, while the interactive dwell continues.
+  function markPlaybackComplete(turnIndex) {
+    if (turnIndex === TURNS.length - 1) {
+      document.body.dataset.playbackComplete = "1";
+    }
+  }
+
+  function finishPlaybackTurn(turnIndex) {
+    animateCancelFn = null;
+    if (!playing) return;
+    markPlaybackComplete(turnIndex);
+    dwellThenAdvance();
+  }
+
   function playStep() {
     if (!playing) return;
     if (currentTurn >= TURNS.length) {
@@ -2359,19 +2373,17 @@ body.in-iframe .more-open-link + hr.more-divider { display: block; }
     const wrappers = el.querySelectorAll(".block-wrapper");
     if (wrappers.length === 0 && !pacedWording) {
       scrollToBottom(el);
-      dwellThenAdvance();
+      finishPlaybackTurn(currentTurn - 1);
       return;
     }
 
     // Animate blocks within the turn, then dwell before advancing
-    animateCancelFn = animatePlaybackTurn(currentTurn - 1, () => {
-      animateCancelFn = null;
-      if (!playing) return;
-      dwellThenAdvance();
-    });
+    const turnIndex = currentTurn - 1;
+    animateCancelFn = animatePlaybackTurn(turnIndex, () => finishPlaybackTurn(turnIndex));
   }
 
   function startPlay() {
+    delete document.body.dataset.playbackComplete;
     hideSplash();
 
     if (currentTurn >= TURNS.length) {
@@ -2414,14 +2426,15 @@ body.in-iframe .more-open-link + hr.more-divider { display: block; }
       const ps = animatePausedState;
       animatePausedState = null;
       if (ps.mode === "dwell") {
+        markPlaybackComplete(ps.turnIndex);
         dwellThenAdvance(ps.remainingMs);
         return;
       }
-      animateCancelFn = animatePlaybackTurn(ps.turnIndex, () => {
-        animateCancelFn = null;
-        if (!playing) return;
-        dwellThenAdvance();
-      }, ps.mode === "paced-wording" ? ps : ps.blockIdx);
+      animateCancelFn = animatePlaybackTurn(
+        ps.turnIndex,
+        () => finishPlaybackTurn(ps.turnIndex),
+        ps.mode === "paced-wording" ? ps : ps.blockIdx,
+      );
       return;
     }
 
@@ -2433,16 +2446,17 @@ body.in-iframe .more-open-link + hr.more-divider { display: block; }
         const total = turnEl.querySelectorAll(".block-wrapper").length;
         if (revealed < total) {
           // Partially revealed (from block-by-block stepping): animate remaining blocks
-          animateCancelFn = animatePlaybackTurn(currentTurn - 1, () => {
-            animateCancelFn = null;
-            if (!playing) return;
-            dwellThenAdvance();
-          }, revealed);
+          const turnIndex = currentTurn - 1;
+          animateCancelFn = animatePlaybackTurn(
+            turnIndex,
+            () => finishPlaybackTurn(turnIndex),
+            revealed,
+          );
           return;
         }
         if (revealed > 0 && total > 0) {
           // Fully revealed (from scrolling): dwell then advance to next turn
-          dwellThenAdvance();
+          finishPlaybackTurn(currentTurn - 1);
           return;
         }
       }

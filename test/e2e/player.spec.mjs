@@ -62,6 +62,58 @@ test("clicking play hides splash and starts revealing blocks", async ({ page }) 
   await expect(page.locator('.turn[data-index="1"] .block-wrapper:not(.block-hidden)').first()).toBeVisible({ timeout: 5000 });
 });
 
+test("playback completion marker stays absent during nonterminal interactions", async ({ page }) => {
+  await goto(page);
+  const body = page.locator("body");
+
+  await expect(body).not.toHaveAttribute("data-playback-complete");
+
+  await pressKey(page, "ArrowRight"); // splash → turn 1
+  await pressKey(page, "ArrowRight"); // reveal thinking
+  await page.locator('.turn[data-index="1"] .thinking-header').click();
+  await expect(body).not.toHaveAttribute("data-playback-complete");
+
+  await page.locator("#btn-play").click();
+  await expect(page.locator("#btn-play")).toHaveClass(/active/);
+  await page.locator("#btn-play").click();
+  await expect(body).not.toHaveAttribute("data-playback-complete");
+
+  await page.locator("#btn-next-turn").click();
+  await expect(page.locator('.turn[data-index="2"]')).toBeVisible();
+  await expect(body).not.toHaveAttribute("data-playback-complete");
+});
+
+test("missing turn stop does not publish playback completion", async ({ page }) => {
+  await goto(page);
+  const body = page.locator("body");
+
+  await page.locator("#transcript").evaluate((transcript) => transcript.replaceChildren());
+  await page.locator("#splash-play").click();
+
+  await expect(page.locator("#btn-play")).not.toHaveClass(/active/);
+  await expect(body).not.toHaveAttribute("data-playback-complete");
+});
+
+test("final content completion marks the capture boundary before dwell and replay clears it", async ({ page }) => {
+  await goto(page, "turn=5");
+  const body = page.locator("body");
+  const playButton = page.locator("#btn-play");
+
+  await expect(body).not.toHaveAttribute("data-playback-complete");
+  await playButton.click();
+  await page.locator("#speed-btn").click();
+  await page.locator('#speed-popover button[data-speed="5"]').click();
+
+  await expect(body).toHaveAttribute("data-playback-complete", "1", { timeout: 5000 });
+  await expect(playButton).toHaveClass(/active/);
+  await expect(page.locator('.turn[data-index="5"] .block-wrapper.block-hidden')).toHaveCount(0);
+
+  await expect(playButton).not.toHaveClass(/active/, { timeout: 3000 });
+  await playButton.click();
+  expect(await body.getAttribute("data-playback-complete")).toBeNull();
+  await playButton.click();
+});
+
 test("paced wording illuminates whole words and pauses in place", async ({ page }) => {
   await page.goto(getPacedWordingFileUrl());
   await waitForReady(page);
@@ -262,6 +314,8 @@ test("paced wording final completion reaches the advertised total", async ({ pag
   await page.locator("#speed-btn").click();
   await page.locator('#speed-popover button[data-speed="5"]').click();
 
+  await expect(page.locator("body")).toHaveAttribute("data-playback-complete", "1", { timeout: 5000 });
+  await expect(page.locator("#btn-play")).toHaveClass(/active/);
   await expect(page.locator("#btn-play")).not.toHaveClass(/active/, { timeout: 5000 });
   const completed = await timerState(page);
   expect(completed.elapsed).toBe(completed.total);

@@ -113,6 +113,11 @@ function loadAutosave(sourcePath) {
 
 /** Delete autosave for a source path. */
 function deleteAutosave(sourcePath) {
+  const pending = autosaveTimers.get(sourcePath);
+  if (pending) {
+    clearTimeout(pending);
+    autosaveTimers.delete(sourcePath);
+  }
   try {
     const p = autosavePath(sourcePath);
     if (existsSync(p)) unlinkSync(p);

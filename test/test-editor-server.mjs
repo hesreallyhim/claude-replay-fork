@@ -629,6 +629,14 @@ describe("editor-server API", () => {
       const autosaveFile = join(homedir(), ".claude-replay", "autosave", hash + ".json");
       assert.ok(existsSync(autosaveFile), "autosave should exist before reset");
 
+      // Schedule another save, then reset before its timer fires. Reset must
+      // cancel that pending write so stale state cannot reappear afterward.
+      await fetch(`${baseUrl}/api/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: sid, options: { excludeTurns: [2] } }),
+      });
+
       // Reset
       await fetch(`${baseUrl}/api/reset`, {
         method: "POST",
@@ -637,6 +645,8 @@ describe("editor-server API", () => {
       });
 
       assert.ok(!existsSync(autosaveFile), "autosave should be deleted after reset");
+      await new Promise((r) => setTimeout(r, 2500));
+      assert.ok(!existsSync(autosaveFile), "pending autosave should stay cancelled after reset");
     } finally {
       if (existsSync(tmpFixture)) unlinkSync(tmpFixture);
     }

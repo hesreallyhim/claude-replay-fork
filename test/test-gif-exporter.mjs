@@ -1,9 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
+import { performance } from "node:perf_hooks";
 import {
   GIF_EXPORT_PROFILE,
   GifExportError,
@@ -138,6 +139,22 @@ describe("GIF exporter", () => {
     }
   });
 
+  it("includes system-wide and per-user macOS browser installations", () => {
+    const homeDir = "/Users/gif-export-test";
+    const candidates = __test.systemBrowserCandidates({}, "darwin", homeDir);
+    const applicationRoots = ["/Applications", join(homeDir, "Applications")];
+    const browserExecutables = [
+      ["Google Chrome", join("Google Chrome.app", "Contents", "MacOS", "Google Chrome")],
+      ["Chromium", join("Chromium.app", "Contents", "MacOS", "Chromium")],
+      ["Microsoft Edge", join("Microsoft Edge.app", "Contents", "MacOS", "Microsoft Edge")],
+    ];
+
+    assert.deepEqual(
+      candidates,
+      applicationRoots.flatMap((root) => browserExecutables.map(([name, relative]) => [name, join(root, relative)])),
+    );
+  });
+
   it("closes a browser that finishes launching after cancellation", async () => {
     const dir = mkdtempSync(join(tmpdir(), "claude-replay-browser-abort-"));
     const executable = join(dir, process.platform === "win32" ? "chromium.exe" : "chromium");
@@ -178,6 +195,72 @@ describe("GIF exporter", () => {
         readdirSync(dir).sort(),
         Array.from({ length: 8 }, (_, offset) => `frame-${String(offset + 4).padStart(6, "0")}.png`),
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("backfills deadlines missed by a delayed playback screenshot before promoting it", async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "claude-replay-playback-test-"));
+    let now = 0;
+    let screenshots = 0;
+    t.mock.method(performance, "now", () => now);
+    const page = {
+      screenshot: async ({ path }) => {
+        screenshots++;
+        if (screenshots === 2) now = 350;
+        writeFileSync(path, `screenshot-${screenshots}`);
+      },
+      locator: () => ({
+        count: async () => {
+          if (screenshots === 1) {
+            now = 100;
+            return 0;
+          }
+          return 1;
+        },
+      }),
+    };
+
+    try {
+      const nextIndex = await __test.capturePlayback(page, dir, 0);
+      assert.equal(screenshots, 2);
+      assert.equal(nextIndex, 4);
+      for (let index = 0; index < 3; index++) {
+        assert.equal(
+          readFileSync(join(dir, `frame-${String(index).padStart(6, "0")}.png`), "utf8"),
+          "screenshot-1",
+          `missed deadline ${index} should retain the prior frame`,
+        );
+      }
+      assert.equal(
+        readFileSync(join(dir, "frame-000003.png"), "utf8"),
+        "screenshot-2",
+        "the delayed screenshot should be promoted only after missed deadlines",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the final splash frame when the first playback screenshot is delayed", async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "claude-replay-first-playback-test-"));
+    let now = 0;
+    t.mock.method(performance, "now", () => now);
+    const page = {
+      screenshot: async ({ path }) => {
+        now = 150;
+        writeFileSync(path, "first-playback-frame");
+      },
+      locator: () => ({ count: async () => 1 }),
+    };
+
+    try {
+      writeFileSync(join(dir, "frame-000007.png"), "final-splash-frame");
+      const nextIndex = await __test.capturePlayback(page, dir, 8);
+      assert.equal(nextIndex, 10);
+      assert.equal(readFileSync(join(dir, "frame-000008.png"), "utf8"), "final-splash-frame");
+      assert.equal(readFileSync(join(dir, "frame-000009.png"), "utf8"), "first-playback-frame");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

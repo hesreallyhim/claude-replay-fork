@@ -15,11 +15,12 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
@@ -136,15 +137,17 @@ async function loadPlaywright(cwd) {
   }
 }
 
-function systemBrowserCandidates(env = process.env) {
-  if (process.platform === "darwin") {
-    return [
-      ["Google Chrome", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"],
-      ["Chromium", "/Applications/Chromium.app/Contents/MacOS/Chromium"],
-      ["Microsoft Edge", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+function systemBrowserCandidates(env = process.env, platform = process.platform, homeDir = homedir()) {
+  if (platform === "darwin") {
+    const roots = ["/Applications", join(homeDir, "Applications")];
+    const relativeCandidates = [
+      ["Google Chrome", join("Google Chrome.app", "Contents", "MacOS", "Google Chrome")],
+      ["Chromium", join("Chromium.app", "Contents", "MacOS", "Chromium")],
+      ["Microsoft Edge", join("Microsoft Edge.app", "Contents", "MacOS", "Microsoft Edge")],
     ];
+    return roots.flatMap((root) => relativeCandidates.map(([name, relative]) => [name, join(root, relative)]));
   }
-  if (process.platform === "win32") {
+  if (platform === "win32") {
     const roots = [env.PROGRAMFILES, env["PROGRAMFILES(X86)"], env.LOCALAPPDATA].filter(Boolean);
     const relativeCandidates = [
       ["Google Chrome", join("Google", "Chrome", "Application", "chrome.exe")],
@@ -314,7 +317,8 @@ async function capturePlayback(page, framesDir, startIndex, signal, getPageFailu
   const startedAt = performance.now();
   let nextDeadline = startedAt;
   let frameIndex = startIndex;
-  let lastPath = null;
+  let lastPath = startIndex > 0 ? framePath(framesDir, startIndex - 1) : null;
+  const pendingPath = join(framesDir, ".playback-pending.png");
 
   while (true) {
     throwIfAborted(signal);
@@ -329,17 +333,19 @@ async function capturePlayback(page, framesDir, startIndex, signal, getPageFailu
     const remaining = nextDeadline - performance.now();
     if (remaining > 0) await wait(remaining, signal);
 
-    const currentPath = framePath(framesDir, frameIndex++);
-    await page.screenshot({ path: currentPath });
+    await page.screenshot({ path: pendingPath });
     throwIfPageFailed(getPageFailure);
-    lastPath = currentPath;
+    const completedAt = performance.now();
 
     nextDeadline += FRAME_INTERVAL_MS;
-    while (nextDeadline <= performance.now()) {
+    while (nextDeadline <= completedAt) {
       throwIfAborted(signal);
-      copyFileSync(lastPath, framePath(framesDir, frameIndex++));
+      copyFileSync(lastPath ?? pendingPath, framePath(framesDir, frameIndex++));
       nextDeadline += FRAME_INTERVAL_MS;
     }
+    const currentPath = framePath(framesDir, frameIndex++);
+    renameSync(pendingPath, currentPath);
+    lastPath = currentPath;
 
     const complete = await page.locator('body[data-playback-complete="1"]').count() > 0;
     if (complete) return frameIndex;
